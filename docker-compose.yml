@@ -1,0 +1,110 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: fleetflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fleetflow
+      POSTGRES_USER: fleetflow
+      POSTGRES_PASSWORD: fleetflow_secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: fleetflow_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fleetflow_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://fleetflow:fleetflow_secret@db:5432/fleetflow
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: change-this-in-production-use-long-random-string
+      JWT_ACCESS_TOKEN_EXPIRES: 900
+      JWT_REFRESH_TOKEN_EXPIRES: 604800
+      FLASK_ENV: development
+      FLASK_DEBUG: "1"
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app
+    command: flask run --host=0.0.0.0 --port=5000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fleetflow_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:5000/api/v1
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0 --port 3000
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fleetflow_celery
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://fleetflow:fleetflow_secret@db:5432/fleetflow
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: change-this-in-production-use-long-random-string
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fleetflow_beat
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: postgresql://fleetflow:fleetflow_secret@db:5432/fleetflow
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: change-this-in-production-use-long-random-string
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+
+volumes:
+  postgres_data:
